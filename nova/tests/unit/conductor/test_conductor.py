@@ -1811,11 +1811,16 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
                 'uuid': instance['uuid'], },
         }
 
+    @mock.patch.object(objects.ComputeNode,
+                       'get_first_node_by_host_for_old_compat')
     @mock.patch.object(objects.InstanceMapping, 'get_by_instance_uuid')
     @mock.patch.object(scheduler_utils, 'set_vm_state_and_notify')
     @mock.patch.object(live_migrate.LiveMigrationTask, 'execute')
     def _test_migrate_server_deals_with_expected_exceptions(self, ex,
-            mock_execute, mock_set, get_im):
+                    mock_execute, mock_set, get_im, get_cn):
+        fake_compute_node = objects.ComputeNode(host='destination',
+                                                hypervisor_hostname='host')
+        get_cn.return_value = fake_compute_node
         get_im.return_value.cell_mapping = (
             objects.CellMappingList.get_all(self.context)[0])
         instance = fake_instance.fake_db_instance(uuid=uuids.instance,
@@ -1838,8 +1843,14 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
                  'expected_task_state': task_states.MIGRATING},
                 ex, self._build_request_spec(inst_obj))
 
+    @mock.patch.object(objects.ComputeNode,
+                       'get_first_node_by_host_for_old_compat')
     @mock.patch.object(objects.InstanceMapping, 'get_by_instance_uuid')
-    def test_migrate_server_deals_with_invalidcpuinfo_exception(self, get_im):
+    def test_migrate_server_deals_with_invalidcpuinfo_exception(self, get_im,
+                                                                get_cn):
+        fake_compute_node = objects.ComputeNode(host='destination',
+                                                hypervisor_hostname='host')
+        get_cn.return_value = fake_compute_node
         get_im.return_value.cell_mapping = (
             objects.CellMappingList.get_all(self.context)[0])
         instance = fake_instance.fake_db_instance(uuid=uuids.instance,
@@ -1893,11 +1904,17 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
         for ex in exs:
             self._test_migrate_server_deals_with_expected_exceptions(ex)
 
+    @mock.patch.object(objects.ComputeNode,
+                       'get_first_node_by_host_for_old_compat')
     @mock.patch.object(objects.InstanceMapping, 'get_by_instance_uuid')
     @mock.patch.object(scheduler_utils, 'set_vm_state_and_notify')
     @mock.patch.object(live_migrate.LiveMigrationTask, 'execute')
-    def test_migrate_server_deals_with_unexpected_exceptions(self,
-            mock_live_migrate, mock_set_state, get_im):
+    def test_migrate_server_deals_with_unexpected_exceptions(
+            self,
+            mock_live_migrate, mock_set_state, get_im, mock_get_cn):
+        fake_compute_node = objects.ComputeNode(host='destination',
+                                                hypervisor_hostname='host')
+        mock_get_cn.return_value = fake_compute_node
         get_im.return_value.cell_mapping = (
             objects.CellMappingList.get_all(self.context)[0])
         expected_ex = IOError('fake error')

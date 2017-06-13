@@ -268,6 +268,18 @@ _MIGRATION_FIXTURES = {
         migration_type='evacuation',
         status='pre-migrating'
     ),
+    'source-only-live-migration': objects.Migration(
+        id=5,
+        instance_uuid='ee761587-af82-41f8-af5a-f17d9ddaa8a1',
+        source_compute=_HOSTNAME,
+        dest_compute='other-host',
+        source_node=_NODENAME,
+        dest_node='other-node',
+        old_instance_type_id=1,
+        new_instance_type_id=2,
+        migration_type='live-migration',
+        status='migrating'
+    ),
 }
 
 _MIGRATION_INSTANCE_FIXTURES = {
@@ -367,6 +379,30 @@ _MIGRATION_INSTANCE_FIXTURES = {
         old_flavor=_INSTANCE_TYPE_OBJ_FIXTURES[1],
         new_flavor=_INSTANCE_TYPE_OBJ_FIXTURES[2],
     ),
+    # source-only-live-migration
+    'ee761587-af82-41f8-af5a-f17d9ddaa8a1': objects.Instance(
+        id=101,
+        host=None,  # prevent RT trying to lazy-load this
+        node=None,
+        uuid='ee761587-af82-41f8-af5a-f17d9ddaa8a1',
+        memory_mb=_INSTANCE_TYPE_FIXTURES[1]['memory_mb'],
+        vcpus=_INSTANCE_TYPE_FIXTURES[1]['vcpus'],
+        root_gb=_INSTANCE_TYPE_FIXTURES[1]['root_gb'],
+        ephemeral_gb=_INSTANCE_TYPE_FIXTURES[1]['ephemeral_gb'],
+        numa_topology=_INSTANCE_NUMA_TOPOLOGIES['2mb'],
+        pci_requests=None,
+        pci_devices=None,
+        instance_type_id=1,
+        vm_state=vm_states.ACTIVE,
+        power_state=power_state.RUNNING,
+        task_state=task_states.MIGRATING,
+        system_metadata={},
+        os_type='fake-os',
+        project_id='fake-project',
+        flavor=_INSTANCE_TYPE_OBJ_FIXTURES[1],
+        old_flavor=_INSTANCE_TYPE_OBJ_FIXTURES[1],
+        new_flavor=_INSTANCE_TYPE_OBJ_FIXTURES[1],
+    ),
 }
 
 _MIGRATION_CONTEXT_FIXTURES = {
@@ -393,6 +429,11 @@ _MIGRATION_CONTEXT_FIXTURES = {
     '077fb63a-bdc8-4330-90ef-f012082703dc': objects.MigrationContext(
         instance_uuid='077fb63a-bdc8-4330-90ef-f012082703dc',
         migration_id=2,
+        new_numa_topology=None,
+        old_numa_topology=None),
+    'ee761587-af82-41f8-af5a-f17d9ddaa8a1': objects.MigrationContext(
+        instance_uuid='ee761587-af82-41f8-af5a-f17d9ddaa8a1',
+        migration_id=5,
         new_numa_topology=None,
         old_numa_topology=None),
 }
@@ -747,6 +788,53 @@ class TestUpdateAvailableResources(BaseTestCase):
         # Migration.instance property is accessed in the migration
         # processing code, and this property calls
         # objects.Instance.get_by_uuid, so we have the migration return
+        inst_uuid = migr_obj.instance_uuid
+        instance = _MIGRATION_INSTANCE_FIXTURES[inst_uuid].obj_clone()
+        get_inst_mock.return_value = instance
+        instance.migration_context = _MIGRATION_CONTEXT_FIXTURES[inst_uuid]
+
+        update_mock = self._update_available_resources()
+
+        get_cn_mock.assert_called_once_with(mock.sentinel.ctx, _HOSTNAME,
+                                            _NODENAME)
+        expected_resources = copy.deepcopy(_COMPUTE_NODE_FIXTURES[0])
+        vals = {
+            'free_disk_gb': 5,
+            'local_gb': 6,
+            'free_ram_mb': 384,  # 512 total - 128 for possible revert of orig
+            'memory_mb_used': 128,  # 128 possible revert amount
+            'vcpus_used': 1,
+            'local_gb_used': 1,
+            'memory_mb': 512,
+            'current_workload': 0,
+            'vcpus': 4,
+            'running_vms': 0
+        }
+        _update_compute_node(expected_resources, **vals)
+        actual_resources = update_mock.call_args[0][1]
+        self.assertTrue(obj_base.obj_equal_prims(expected_resources,
+                                                 actual_resources))
+
+    @mock.patch('nova.objects.InstancePCIRequests.get_by_instance',
+                return_value=objects.InstancePCIRequests(requests=[]))
+    @mock.patch('nova.objects.PciDeviceList.get_by_compute_node',
+                return_value=objects.PciDeviceList())
+    @mock.patch('nova.objects.ComputeNode.get_by_host_and_nodename')
+    @mock.patch('nova.objects.MigrationList.get_in_progress_by_host_and_node')
+    @mock.patch('nova.objects.Instance.get_by_uuid')
+    @mock.patch('nova.objects.InstanceList.get_by_host_and_node')
+    def test_no_instances_source_live_migration(self, get_mock, get_inst_mock,
+                                                migr_mock, get_cn_mock,
+                                                pci_mock, instance_pci_mock):
+        virt_resources = copy.deepcopy(_VIRT_DRIVER_AVAIL_RESOURCES)
+        virt_resources.update(vcpus_used=4,
+                              memory_mb_used=128,
+                              local_gb_used=1)
+        self._setup_rt(virt_resources=virt_resources)
+        get_mock.return_value = []
+        migr_obj = _MIGRATION_FIXTURES['source-only-live-migration']
+        migr_mock.return_value = [migr_obj]
+        get_cn_mock.return_value = _COMPUTE_NODE_FIXTURES[0]
         inst_uuid = migr_obj.instance_uuid
         instance = _MIGRATION_INSTANCE_FIXTURES[inst_uuid].obj_clone()
         get_inst_mock.return_value = instance
@@ -2242,17 +2330,7 @@ class TestUpdateUsageFromMigration(test.NoDBTestCase):
     @mock.patch('nova.compute.resource_tracker.ResourceTracker.'
                 '_get_instance_type')
     def test_unsupported_move_type(self, get_mock):
-        rt = resource_tracker.ResourceTracker(mock.sentinel.virt_driver,
-                                              _HOSTNAME)
-        migration = objects.Migration(migration_type='live-migration')
-        # For same-node migrations, the RT's _get_instance_type() method is
-        # called if there is a migration that is trackable. Here, we want to
-        # ensure that this method isn't called for live-migration migrations.
-        rt._update_usage_from_migration(mock.sentinel.ctx,
-                                        mock.sentinel.instance,
-                                        migration,
-                                        _NODENAME)
-        self.assertFalse(get_mock.called)
+        pass
 
 
 class TestUpdateUsageFromMigrations(BaseTestCase):
@@ -2600,14 +2678,15 @@ class ComputeMonitorTestCase(BaseTestCase):
 class TestIsTrackableMigration(test.NoDBTestCase):
     def test_true(self):
         mig = objects.Migration()
-        for mig_type in ('resize', 'migration', 'evacuation'):
+        for mig_type in ('resize', 'migration', 'evacuation',
+                         'live-migration'):
             mig.migration_type = mig_type
 
             self.assertTrue(resource_tracker._is_trackable_migration(mig))
 
     def test_false(self):
         mig = objects.Migration()
-        for mig_type in ('live-migration',):
+        for mig_type in ():
             mig.migration_type = mig_type
 
             self.assertFalse(resource_tracker._is_trackable_migration(mig))

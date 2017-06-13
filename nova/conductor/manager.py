@@ -401,9 +401,14 @@ class ComputeTaskManager(base.Base):
 
         migration = objects.Migration(context=context.elevated())
         migration.dest_compute = destination
+        dest_compute_node = (
+            objects.ComputeNode.get_first_node_by_host_for_old_compat(
+                context, destination))
+        migration.dest_node = dest_compute_node.hypervisor_hostname
         migration.status = 'accepted'
         migration.instance_uuid = instance.uuid
         migration.source_compute = instance.host
+        migration.source_node = instance.node
         migration.migration_type = 'live-migration'
         if instance.obj_attr_is_set('flavor'):
             migration.old_instance_type_id = instance.flavor.id

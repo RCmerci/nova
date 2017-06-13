@@ -50,6 +50,21 @@ LOG = logging.getLogger(__name__)
 COMPUTE_RESOURCE_SEMAPHORE = "compute_resources"
 
 
+def _instance_in_live_migration_state(instance):
+    """Returns True if instance is in one of live-migrating states.
+
+    :param instance: `nova.objects.Instance` object
+    """
+    vm = instance.vm_state
+    task = instance.task_state
+    if vm != vm_states.ACTIVE:
+        return False
+
+    if task in [task_states.MIGRATING]:
+        return True
+    return False
+
+
 def _instance_in_resize_state(instance):
     """Returns True if the instance is in one of the resizing states.
 
@@ -72,11 +87,8 @@ def _instance_in_resize_state(instance):
 
 def _is_trackable_migration(migration):
     # Only look at resize/migrate migration and evacuation records
-    # NOTE(danms): RT should probably examine live migration
-    # records as well and do something smart. However, ignore
-    # those for now to avoid them being included in below calculations.
     return migration.migration_type in ('resize', 'migration',
-                                        'evacuation')
+                                        'evacuation', 'live-migration')
 
 
 def _normalize_inventory_from_cn_obj(inv_data, cn):
@@ -952,9 +964,12 @@ class ResourceTracker(object):
                 LOG.debug('Migration instance not found: %s', e)
                 continue
 
-            # skip migration if instance isn't in a resize state:
-            if not _instance_in_resize_state(instances[uuid]):
-                LOG.warning(_LW("Instance not resizing, skipping migration."),
+            # skip migration if instance isn't in a resize/live-migration
+            # state:
+            if not _instance_in_resize_state(instances[uuid]) and (
+                    not _instance_in_live_migration_state(instances[uuid])):
+                LOG.warning(_LW("Instance not resizing or live-migrating, "
+                                "skipping migration."),
                             instance_uuid=uuid)
                 continue
 
